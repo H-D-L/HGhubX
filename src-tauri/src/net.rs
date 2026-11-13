@@ -115,7 +115,22 @@ async fn client_for_dns(raw: &str, public_dns: bool) -> Result<(url::Url, Arc<re
         network_policy::check_addresses_with_mode(&resolution.addresses, strict)?;
         (resolution.addresses, CLIENT_TTL.min(resolution.ttl))
     } else if strict {
-        (network_policy::resolve_target(&target, strict).await?, CLIENT_TTL)
+        match network_policy::resolve_target(&target, strict).await {
+            Ok(addrs) => (addrs, CLIENT_TTL),
+            Err(error)
+                if target.scheme() == "https"
+                    && matches!(target.host(), Some(url::Host::Domain(_)))
+                    && error == "禁止访问普通内网、回环或保留地址（仅放行 FakeIP 198.18.0.0/15）" =>
+            {
+                // Only recover from a rejected DNS answer, never a rejected literal IP or redirect.
+                // The independent resolver must itself return exclusively permitted public addresses.
+                let resolver = build_client(crate::media_dns::HOST, &crate::media_dns::BOOTSTRAP)?;
+                let resolution = crate::media_dns::resolve(&resolver, host, port).await?;
+                network_policy::check_addresses_with_mode(&resolution.addresses, true)?;
+                (resolution.addresses, CLIENT_TTL.min(resolution.ttl))
+            }
+            Err(error) => return Err(error),
+        }
     } else {
         (Vec::new(), CLIENT_TTL)
     };
@@ -1110,3 +1125,4 @@ mod tests {
         );
     }
 }
+
